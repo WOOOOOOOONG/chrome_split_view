@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { 
+      width: 180px; 
+      padding: 15px; 
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      margin: 0;
+    }
+    .title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 15px;
+      color: #323130;
+    }
+    button { 
+      width: 100%; 
+      margin: 8px 0; 
+      padding: 12px; 
+      border: 1px solid #8a8886;
+      background: #ffffff;
+      color: #323130;
+      border-radius: 2px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: all 0.1s ease;
+    }
+    button:hover {
+      background: #f3f2f1;
+      border-color: #323130;
+    }
+    button:active {
+      background: #edebe9;
+    }
+    .divider {
+      height: 1px;
+      background: #edebe9;
+      margin: 10px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="title">분할 화면</div>
+  <button id="splitVertical">세로 분할</button>
+  <button id="splitHorizontal">가로 분할</button>
+  <div class="divider"></div>
+  <button id="closeSplit">분할 해제</button>
+  <script src="popup.js"></script>
+</body>
+</html>
