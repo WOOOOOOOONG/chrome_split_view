@@ -8,6 +8,7 @@ class SplitScreenManager {
     this.rightFrame = null;
     this.history = this.loadHistory();
     this.currentTabs = [];
+    this.sessionSyncInProgress = false;
   }
 
   async init() {
@@ -41,12 +42,12 @@ class SplitScreenManager {
     this.isActive = true;
     this.direction = direction;
 
-    // 전체 컨테이너 생성
+    this.updateTabIcon(true);
+
     this.splitContainer = document.createElement('div');
     this.splitContainer.id = 'split-screen-container';
     this.splitContainer.className = `split-${direction}`;
 
-    // 왼쪽 패널 (현재 페이지)
     this.leftPanel = document.createElement('div');
     this.leftPanel.className = 'split-panel left-panel';
     this.leftPanel.style.flex = '1';
@@ -56,44 +57,60 @@ class SplitScreenManager {
     leftContent.style.cssText = `
       width: 100%;
       height: 100%;
-      overflow: auto;
+      overflow: hidden;
       background: white;
       position: relative;
+    `;
+    
+    const leftControls = document.createElement('div');
+    leftControls.className = 'left-panel-controls';
+    leftControls.innerHTML = `
+      <div class="panel-control-bar">
+        <button id="refreshLeft" class="panel-control-btn" title="새로고침">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+          </svg>
+        </button>
+        <span class="panel-label">현재 페이지</span>
+      </div>
     `;
     
     const pagePreview = document.createElement('iframe');
     pagePreview.src = window.location.href;
     pagePreview.className = 'left-preview';
+    pagePreview.id = 'leftPreviewFrame';
     pagePreview.style.cssText = `
       width: 100%;
       height: 100%;
       border: none;
-      pointer-events: none;
+      pointer-events: auto;
       background: white;
+      transition: opacity 0.2s ease;
     `;
     
+    pagePreview.loading = 'lazy';
+    pagePreview.referrerPolicy = 'same-origin';
+    
     leftContent.appendChild(pagePreview);
+    leftContent.appendChild(leftControls);
     this.leftPanel.appendChild(leftContent);
 
-    // 리사이저
+    this.setupLeftPanelControls();
+
     this.resizer = document.createElement('div');
     this.resizer.className = `resizer resizer-${direction}`;
     this.setupResizer();
 
-    // 오른쪽 패널
     this.rightPanel = document.createElement('div');
     this.rightPanel.className = 'split-panel right-panel';
     this.rightPanel.style.flex = '1';
     
-    // 초기 UI 생성
     this.createInitialUI();
 
-    // 레이아웃 구성
     this.splitContainer.appendChild(this.leftPanel);
     this.splitContainer.appendChild(this.resizer);
     this.splitContainer.appendChild(this.rightPanel);
 
-    // body에 추가하되 기존 내용은 숨기기
     document.body.style.margin = '0';
     document.body.style.padding = '0';
     document.body.style.overflow = 'hidden';
@@ -101,14 +118,26 @@ class SplitScreenManager {
     const originalElements = Array.from(document.body.children);
     originalElements.forEach(el => {
       if (el.id !== 'split-screen-container') {
-        el.style.display = 'none';
+        el.style.visibility = 'hidden';
+        el.style.position = 'absolute';
       }
     });
     
     document.body.appendChild(this.splitContainer);
 
-    // ESC 키로 종료
     document.addEventListener('keydown', this.handleKeydown.bind(this));
+  }
+
+  setupLeftPanelControls() {
+    const refreshBtn = document.getElementById('refreshLeft');
+    const leftFrame = document.getElementById('leftPreviewFrame');
+    
+    if (refreshBtn && leftFrame) {
+      refreshBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        leftFrame.src = leftFrame.src;
+      });
+    }
   }
 
   createInitialUI() {
@@ -129,19 +158,19 @@ class SplitScreenManager {
           <div class="tabs-list" id="tabsList"></div>
         </div>
         
+        <div class="bookmarks-section">
+          <h3>즐겨찾기에서 선택</h3>
+          <div class="bookmarks-list" id="bookmarksList">
+            <div class="loading-bookmarks">
+              <div class="spinner small"></div>
+              <span>즐겨찾기 불러오는 중...</span>
+            </div>
+          </div>
+        </div>
+        
         <div class="history-section" style="display: ${this.history.length > 0 ? 'block' : 'none'}">
           <h3>최근 방문</h3>
           <div class="history-list" id="historyList"></div>
-        </div>
-        
-        <div class="quick-links">
-          <h3>빠른 링크</h3>
-          <div class="links-grid">
-            <button class="quick-link" data-url="https://www.google.com">Google</button>
-            <button class="quick-link" data-url="https://www.naver.com">Naver</button>
-            <button class="quick-link" data-url="https://www.youtube.com">YouTube</button>
-            <button class="quick-link" data-url="https://github.com">GitHub</button>
-          </div>
         </div>
       </div>
     `;
@@ -151,8 +180,220 @@ class SplitScreenManager {
     requestAnimationFrame(() => {
       this.setupInitialUIEvents();
       this.populateTabsList();
+      this.loadChromeBookmarks(); // 크롬 즐겨찾기 로드
       this.populateHistory();
     });
+  }
+
+  // 크롬 즐겨찾기 로드 및 표시 메서드 추가
+  async loadChromeBookmarks() {
+    const bookmarksList = document.getElementById('bookmarksList');
+    if (!bookmarksList) return;
+    
+    try {
+      // 백그라운드 스크립트에 북마크 요청
+      let bookmarks = [];
+      
+      if (typeof chrome !== 'undefined' && chrome.runtime) {
+        try {
+          bookmarks = await new Promise((resolve) => {
+            chrome.runtime.sendMessage({action: 'getBookmarks'}, (response) => {
+              if (response && response.bookmarks) {
+                resolve(response.bookmarks);
+              } else {
+                resolve([]);
+              }
+            });
+          });
+        } catch (e) {
+          console.error('Failed to get bookmarks:', e);
+          // 접근 권한이 없는 경우 대체 메시지 표시
+          bookmarksList.innerHTML = `
+            <div class="bookmarks-error">
+              <p>즐겨찾기를 불러올 수 없습니다. 확장 프로그램의 북마크 접근 권한을 확인해주세요.</p>
+            </div>
+          `;
+          return;
+        }
+      }
+      
+      // 북마크가 없는 경우
+      if (!bookmarks || bookmarks.length === 0) {
+        bookmarksList.innerHTML = `
+          <div class="empty-bookmarks">
+            <p>즐겨찾기가 없습니다. 크롬 즐겨찾기에 사이트를 추가해보세요.</p>
+          </div>
+        `;
+        return;
+      }
+      
+      // 북마크 표시 (최대 10개)
+      bookmarksList.innerHTML = '';
+      const limitedBookmarks = bookmarks.slice(0, 10);
+      
+      limitedBookmarks.forEach(bookmark => {
+        const bookmarkItem = document.createElement('div');
+        bookmarkItem.className = 'bookmark-item';
+        
+        const favicon = this.getDefaultIcon(bookmark.url);
+        
+        bookmarkItem.innerHTML = `
+          <img src="${favicon}" width="16" height="16" onerror="this.style.display='none'">
+          <div class="bookmark-item-content">
+            <span class="bookmark-title">${bookmark.title || this.getDomainFromUrl(bookmark.url)}</span>
+            <span class="bookmark-url">${bookmark.url}</span>
+          </div>
+        `;
+        
+        bookmarkItem.addEventListener('click', () => {
+          this.loadUrl(bookmark.url);
+        });
+        
+        bookmarksList.appendChild(bookmarkItem);
+      });
+      
+      // 더 많은 북마크가 있는 경우 "더 보기" 버튼 추가
+      if (bookmarks.length > 10) {
+        const moreBtn = document.createElement('button');
+        moreBtn.className = 'more-bookmarks-btn';
+        moreBtn.textContent = `더 보기 (${bookmarks.length - 10}개 더)`;
+        moreBtn.addEventListener('click', () => {
+          this.showAllBookmarks(bookmarks);
+        });
+        bookmarksList.appendChild(moreBtn);
+      }
+      
+    } catch (error) {
+      console.error('Error loading bookmarks:', error);
+      bookmarksList.innerHTML = `
+        <div class="bookmarks-error">
+          <p>즐겨찾기를 불러오는 중 오류가 발생했습니다.</p>
+        </div>
+      `;
+    }
+  }
+
+  // 모든 북마크를 보여주는 모달 창
+showAllBookmarks(bookmarks) {
+    const modal = document.createElement('div');
+    modal.className = 'bookmarks-modal';
+    
+    // 북마크를 폴더별로 그룹화
+    const bookmarksByFolder = {};
+    bookmarks.forEach(bookmark => {
+      const folder = bookmark.parentTitle || 'Other';
+      if (!bookmarksByFolder[folder]) {
+        bookmarksByFolder[folder] = [];
+      }
+      bookmarksByFolder[folder].push(bookmark);
+    });
+    
+    let modalContent = `
+      <div class="bookmarks-modal-content">
+        <div class="bookmarks-modal-header">
+          <h3>모든 즐겨찾기</h3>
+          <button class="close-modal-btn">&times;</button>
+        </div>
+        <div class="bookmarks-modal-body">
+          <input type="text" class="bookmark-search" placeholder="즐겨찾기 검색..." />
+          <div class="all-bookmarks-list">
+    `;
+    
+    Object.keys(bookmarksByFolder).sort().forEach(folder => {
+      const folderBookmarks = bookmarksByFolder[folder];
+      
+      modalContent += `
+        <div class="bookmark-folder">
+          <div class="folder-header">${folder} (${folderBookmarks.length})</div>
+          <div class="folder-items">
+      `;
+      
+      folderBookmarks.forEach(bookmark => {
+        const favicon = this.getDefaultIcon(bookmark.url);
+        
+        modalContent += `
+          <div class="bookmark-item" data-url="${bookmark.url}">
+            <img src="${favicon}" width="16" height="16" onerror="this.style.display='none'">
+            <div class="bookmark-item-content">
+              <span class="bookmark-title">${bookmark.title || this.getDomainFromUrl(bookmark.url)}</span>
+              <span class="bookmark-url">${bookmark.url}</span>
+            </div>
+          </div>
+        `;
+      });
+      
+      modalContent += `
+          </div>
+        </div>
+      `;
+    });
+    
+    modalContent += `
+          </div>
+        </div>
+      </div>
+    `;
+    
+    modal.innerHTML = modalContent;
+    document.body.appendChild(modal);
+    
+    // 이벤트 설정
+    modal.querySelector('.close-modal-btn').addEventListener('click', () => {
+      modal.remove();
+    });
+    
+    // 모달 외부 클릭 시 닫기
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) {
+        modal.remove();
+      }
+    });
+    
+    // 검색 기능
+    const searchInput = modal.querySelector('.bookmark-search');
+    searchInput.addEventListener('input', (e) => {
+      const searchTerm = e.target.value.toLowerCase();
+      
+      modal.querySelectorAll('.bookmark-item').forEach(item => {
+        const title = item.querySelector('.bookmark-title').textContent.toLowerCase();
+        const url = item.querySelector('.bookmark-url').textContent.toLowerCase();
+        
+        if (title.includes(searchTerm) || url.includes(searchTerm)) {
+          item.style.display = '';
+        } else {
+          item.style.display = 'none';
+        }
+      });
+      
+      // 폴더 헤더 표시/숨김 처리
+      modal.querySelectorAll('.bookmark-folder').forEach(folder => {
+        const visibleItems = folder.querySelectorAll('.bookmark-item[style=""]').length;
+        const folderHeader = folder.querySelector('.folder-header');
+        
+        if (visibleItems === 0) {
+          folder.style.display = 'none';
+        } else {
+          folder.style.display = '';
+          // 표시되는 항목 수 업데이트
+          const folderName = folderHeader.textContent.split('(')[0].trim();
+          folderHeader.textContent = `${folderName} (${visibleItems})`;
+        }
+      });
+    });
+    
+    // 북마크 클릭 이벤트
+    modal.querySelectorAll('.bookmark-item[data-url]').forEach(item => {
+      item.addEventListener('click', () => {
+        const url = item.dataset.url;
+        this.loadUrl(url);
+        modal.remove();
+      });
+    });
+    
+    // 포커스 설정
+    setTimeout(() => {
+      searchInput.focus();
+    }, 100);
   }
 
   populateTabsList() {
@@ -240,7 +481,6 @@ class SplitScreenManager {
   }
 
   async loadUrl(url) {
-    // URL 정규화
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       if (url.includes('.') && !url.includes(' ')) {
         url = 'https://' + url;
@@ -251,6 +491,14 @@ class SplitScreenManager {
 
     this.addToHistory(url);
     this.showLoading();
+
+    const targetDomain = new URL(url).hostname;
+    const needsSessionSync = this.checkIfNeedsSessionSync(targetDomain);
+
+    if (needsSessionSync) {
+      console.log(`Pre-syncing session for ${targetDomain}`);
+      await this.preSessionSync(targetDomain, url);
+    }
 
     const relevantTabs = this.currentTabs.filter(tab => {
       try {
@@ -325,6 +573,136 @@ class SplitScreenManager {
     }, 100);
   }
 
+  checkIfNeedsSessionSync(domain) {
+    // 대부분의 웹사이트는 세션 동기화가 필요함
+    // 단순한 정적 사이트나 검색 엔진만 제외
+    const staticSites = [
+      'google.com', 'bing.com', 'duckduckgo.com',
+      'wikipedia.org', 'github.io', 'blogspot.com',
+      'wordpress.com', 'medium.com'
+    ];
+    
+    // 로그인이 필요 없는 사이트가 아니라면 대부분 세션 동기화 필요
+    const isStaticSite = staticSites.some(site => domain.includes(site));
+    return !isStaticSite;
+  }
+
+  async preSessionSync(domain, targetUrl) {
+    if (this.sessionSyncInProgress) return;
+    
+    this.sessionSyncInProgress = true;
+    
+    try {
+      console.log(`Universal session sync for ${domain}`);
+      
+      // 1. 현재 페이지와 관련된 모든 도메인의 쿠키 수집
+      const allDomains = this.getRelatedDomains(domain);
+      const allCookies = [];
+      
+      for (const d of allDomains) {
+        try {
+          const cookies = await chrome.runtime.sendMessage({
+            action: 'getDomainCookies',
+            domain: d
+          });
+          if (cookies && cookies.length > 0) {
+            allCookies.push(...cookies);
+          }
+        } catch (e) {
+          console.log(`Failed to get cookies for ${d}:`, e);
+        }
+      }
+      
+      // 2. 중요한 쿠키들 필터링 (더 포괄적으로)
+      const importantCookies = allCookies.filter(cookie => {
+        const name = cookie.name.toLowerCase();
+        const value = cookie.value.toLowerCase();
+        
+        // 세션/인증 관련 쿠키 패턴들
+        const sessionPatterns = [
+          'session', 'auth', 'token', 'login', 'user', 'sid', 'sso',
+          'csrf', 'xsrf', 'jwt', 'bearer', 'oauth', 'identity',
+          'remember', 'persistent', 'connect', 'secure', 'refresh',
+          '_ga', '_gid', '_gat', // Google Analytics
+          'PHPSESSID', 'JSESSIONID', 'ASP.NET_SessionId', // 서버 세션
+          '__cf_bm', '__cflb', // Cloudflare
+          '_fbp', '_fbc', // Facebook
+          'AWSALB', 'AWSALBCORS' // AWS Load Balancer
+        ];
+        
+        // 쿠키 이름이나 값에 세션 관련 패턴이 있는지 확인
+        const hasSessionPattern = sessionPatterns.some(pattern => 
+          name.includes(pattern) || value.includes(pattern)
+        );
+        
+        // httpOnly나 secure 플래그가 있는 쿠키들도 중요
+        const isSecureCookie = cookie.httpOnly || cookie.secure;
+        
+        // 만료 시간이 없거나 가까운 쿠키들 (세션 쿠키)
+        const isSessionCookie = !cookie.expirationDate || 
+          (cookie.expirationDate && (cookie.expirationDate * 1000 - Date.now()) < 86400000); // 24시간 이내
+        
+        return hasSessionPattern || isSecureCookie || isSessionCookie;
+      });
+      
+      console.log(`Found ${importantCookies.length} important cookies out of ${allCookies.length} total`);
+      
+      // 3. 범용 세션 동기화 실행
+      const result = await chrome.runtime.sendMessage({
+        action: 'advancedSessionSync',
+        domain: domain.replace('www.', ''),
+        targetUrl: targetUrl,
+        sessionCookies: importantCookies,
+        allCookies: allCookies
+      });
+      
+      console.log('Universal session sync result:', result);
+      
+      // 4. 쿠키 전파를 위한 대기 시간
+      await new Promise(resolve => setTimeout(resolve, 800));
+      
+    } catch (e) {
+      console.error('Universal session sync failed:', e);
+    } finally {
+      this.sessionSyncInProgress = false;
+    }
+  }
+
+  // 관련 도메인들을 찾는 함수
+  getRelatedDomains(domain) {
+    const domains = new Set();
+    
+    // 기본 도메인 변형들
+    domains.add(domain);
+    domains.add(`.${domain}`);
+    domains.add(domain.replace('www.', ''));
+    domains.add(`.${domain.replace('www.', '')}`);
+    
+    // 현재 페이지의 도메인도 포함
+    const currentDomain = window.location.hostname;
+    domains.add(currentDomain);
+    domains.add(`.${currentDomain}`);
+    domains.add(currentDomain.replace('www.', ''));
+    domains.add(`.${currentDomain.replace('www.', '')}`);
+    
+    // 서브도메인 패턴 추가
+    const domainParts = domain.split('.');
+    if (domainParts.length >= 2) {
+      const rootDomain = domainParts.slice(-2).join('.');
+      domains.add(rootDomain);
+      domains.add(`.${rootDomain}`);
+      
+      // 일반적인 서브도메인들
+      const commonSubdomains = ['www', 'api', 'auth', 'login', 'accounts', 'sso', 'id'];
+      commonSubdomains.forEach(sub => {
+        domains.add(`${sub}.${rootDomain}`);
+        domains.add(`.${sub}.${rootDomain}`);
+      });
+    }
+    
+    return Array.from(domains);
+  }
+
   createAndLoadIframe(url) {
     const container = document.getElementById('iframeContainer');
     if (!container) return;
@@ -334,7 +712,6 @@ class SplitScreenManager {
       existingFrame.remove();
     }
 
-    // Gmail 특별 처리
     if (url.includes('gmail.com') || url.includes('mail.google.com')) {
       this.handleGmailSpecial(url, container);
       return;
@@ -351,7 +728,6 @@ class SplitScreenManager {
       loadingIndicator.remove();
     }
     
-    // 여러 Gmail 접근 방법 시도
     const gmailOptions = [
       {
         name: '기본 Gmail',
@@ -410,13 +786,11 @@ class SplitScreenManager {
     
     container.appendChild(gmailAlt);
     
-    // 각 옵션 버튼 이벤트
     document.querySelectorAll('.gmail-option-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const optionUrl = btn.dataset.url;
         const index = parseInt(btn.dataset.index);
         
-        // 로딩 표시
         gmailAlt.innerHTML = `
           <div class="alternative-content">
             <div class="spinner large"></div>
@@ -424,7 +798,6 @@ class SplitScreenManager {
           </div>
         `;
         
-        // 특별한 방법으로 iframe 시도
         this.tryGmailIframe(optionUrl, container, gmailOptions[index].name);
       });
     });
@@ -447,7 +820,6 @@ class SplitScreenManager {
       transition: opacity 0.3s ease;
     `;
 
-    // Gmail 전용 속성들
     this.rightFrame.referrerPolicy = 'strict-origin-when-cross-origin';
     this.rightFrame.loading = 'lazy';
     
@@ -458,10 +830,8 @@ class SplitScreenManager {
       loadSuccess = true;
       if (loadTimeout) clearTimeout(loadTimeout);
       
-      // 성공적으로 로드되면 표시
       setTimeout(() => {
         try {
-          // iframe 내용 접근 시도로 차단 여부 확인
           const doc = this.rightFrame.contentDocument;
           if (doc && doc.body && doc.body.innerHTML.length > 100) {
             this.rightFrame.style.opacity = '1';
@@ -471,13 +841,11 @@ class SplitScreenManager {
             throw new Error('Empty or blocked content');
           }
         } catch (e) {
-          // 여전히 차단되면 대안 표시
           this.showGmailFallback(url, container, optionName);
         }
       }, 1000);
     });
 
-    // 타임아웃 설정
     loadTimeout = setTimeout(() => {
       if (!loadSuccess) {
         this.showGmailFallback(url, container, optionName);
@@ -486,7 +854,6 @@ class SplitScreenManager {
 
     container.appendChild(this.rightFrame);
     
-    // User-Agent를 변경해서 모바일처럼 보이게 (일부 사이트에서 효과적)
     requestAnimationFrame(() => {
       this.rightFrame.src = url;
     });
@@ -548,55 +915,239 @@ class SplitScreenManager {
       transition: opacity 0.3s ease;
     `;
 
+    // 범용적인 iframe 설정
+    this.rightFrame.loading = 'eager';
+    this.rightFrame.referrerPolicy = 'same-origin'; // 더 안전한 설정
+    
     const targetDomain = new URL(url).hostname;
-    const needsCookieSync = ['claude.ai', 'calendar.google.com', 'drive.google.com', 'accounts.google.com', 'notion.so'].some(domain => 
-      targetDomain.includes(domain)
-    );
+    const needsSessionSync = this.checkIfNeedsSessionSync(targetDomain);
+    
+    // sandbox 설정은 최소한으로 (호환성 향상)
+    if (needsSessionSync) {
+      console.log(`Setting up universal session sync for ${targetDomain}`);
+      
+      // 현재 도메인과 같은 경우에만 sandbox 제한
+      const currentDomain = window.location.hostname;
+      const isSameDomain = targetDomain === currentDomain || 
+                          targetDomain.endsWith(`.${currentDomain}`) ||
+                          currentDomain.endsWith(`.${targetDomain}`);
+      
+      if (isSameDomain) {
+        this.rightFrame.sandbox = 'allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-same-origin';
+      }
+    }
 
     let loadTimeout;
     let hasLoaded = false;
+    let retryCount = 0;
+    const maxRetries = 1; // 재시도 1회로 제한
 
-    this.rightFrame.addEventListener('load', async () => {
+    const handleLoad = async () => {
       hasLoaded = true;
       if (loadTimeout) clearTimeout(loadTimeout);
       
-      if (needsCookieSync) {
-        console.log(`Syncing cookies for ${targetDomain}`);
+      // 세션 검증을 더 관대하게
+      if (needsSessionSync && retryCount === 0) {
+        console.log(`Checking session for ${targetDomain}`);
+        
         try {
-          const result = await chrome.runtime.sendMessage({
-            action: 'syncCookies',
-            domain: targetDomain.replace('www.', ''),
-            targetUrl: url
-          });
-          console.log('Cookie sync result:', result);
+          // 간단한 세션 검증만 수행
+          const sessionValid = await this.quickSessionCheck(this.rightFrame, url);
           
-          if (result.success && result.syncedCount > 0 && !this.rightFrame.dataset.synced) {
-            this.rightFrame.dataset.synced = 'true';
-            setTimeout(() => {
-              this.rightFrame.src = url;
-            }, 500);
+          if (!sessionValid && retryCount < maxRetries) {
+            console.log('Session might be invalid, trying to refresh cookies...');
+            retryCount++;
+            
+            // 추가 쿠키 동기화 후 재시도
+            setTimeout(async () => {
+              await this.forceSessionSync(targetDomain, url);
+              this.rightFrame.src = url + (url.includes('?') ? '&' : '?') + `t=${Date.now()}`;
+            }, 1000);
             return;
           }
         } catch (e) {
-          console.log('Cookie sync failed:', e);
+          console.log('Session check failed, proceeding anyway:', e);
         }
       }
       
       this.hideLoadingIndicator();
+    };
+
+    this.rightFrame.addEventListener('load', handleLoad);
+
+    this.rightFrame.addEventListener('error', () => {
+      console.log('iframe error for:', url);
+      if (!hasLoaded) {
+        this.handleIframeLoadError(url);
+      }
     });
 
+    // 더 관대한 타임아웃
+    const timeoutDuration = 12000; // 12초로 통일
     loadTimeout = setTimeout(() => {
       if (!hasLoaded) {
         console.log('iframe load timeout for:', url);
         this.handleIframeLoadError(url);
       }
-    }, 10000);
+    }, timeoutDuration);
 
     container.appendChild(this.rightFrame);
     
-    requestAnimationFrame(() => {
+    // 즉시 로드 (지연 최소화)
+    setTimeout(() => {
       this.rightFrame.src = url;
-    });
+    }, 100);
+  }
+
+  // 빠른 세션 체크 (더 관대함)
+  async quickSessionCheck(iframe, originalUrl) {
+    try {
+      await new Promise(resolve => setTimeout(resolve, 1000)); // 1초만 대기
+      
+      const currentSrc = iframe.src || '';
+      
+      // 명확한 로그인 페이지 패턴만 체크
+      const loginIndicators = [
+        '/login',
+        '/signin',
+        '/authenticate',
+        'login.',
+        'auth.',
+        'accounts.',
+        '/oauth/authorize',
+        '/sso/'
+      ];
+      
+      const hasLoginIndicator = loginIndicators.some(indicator => 
+        currentSrc.toLowerCase().includes(indicator)
+      );
+      
+      if (hasLoginIndicator) {
+        console.log('Detected login page');
+        return false;
+      }
+      
+      return true; // 기본적으로 통과
+      
+    } catch (e) {
+      console.log('Quick session check error:', e);
+      return true; // 에러 시 통과
+    }
+  }
+
+  // 강제 세션 동기화
+  async forceSessionSync(domain, targetUrl) {
+    try {
+      console.log(`Force syncing session for ${domain}`);
+      
+      // 모든 관련 도메인의 쿠키를 가져와서 동기화
+      const allDomains = this.getRelatedDomains(domain);
+      const allCookies = [];
+      
+      for (const d of allDomains) {
+        try {
+          const cookies = await chrome.runtime.sendMessage({
+            action: 'getDomainCookies',
+            domain: d
+          });
+          if (cookies && cookies.length > 0) {
+            allCookies.push(...cookies);
+          }
+        } catch (e) {
+          // 무시
+        }
+      }
+      
+      // 모든 쿠키를 세션 쿠키로 취급하여 동기화
+      const result = await chrome.runtime.sendMessage({
+        action: 'advancedSessionSync',
+        domain: domain.replace('www.', ''),
+        targetUrl: targetUrl,
+        sessionCookies: allCookies, // 모든 쿠키를 세션 쿠키로
+        allCookies: allCookies
+      });
+      
+      console.log('Force session sync result:', result);
+      return result;
+      
+    } catch (e) {
+      console.log('Force session sync failed:', e);
+      return { success: false };
+    }
+  }
+
+  async advancedSessionSync(domain, targetUrl) {
+    try {
+      // 범용적인 쿠키 수집
+      const allDomains = this.getRelatedDomains(domain);
+      const allCookies = [];
+      
+      for (const d of allDomains) {
+        try {
+          const cookies = await chrome.runtime.sendMessage({
+            action: 'getDomainCookies',
+            domain: d
+          });
+          if (cookies && cookies.length > 0) {
+            allCookies.push(...cookies);
+          }
+        } catch (e) {
+          console.log(`Failed to get cookies for ${d}:`, e);
+        }
+      }
+      
+      // 중복 제거
+      const uniqueCookies = allCookies.filter((cookie, index, self) =>
+        index === self.findIndex(c => c.name === cookie.name && c.domain === cookie.domain)
+      );
+      
+      // 모든 쿠키를 중요하게 취급 (범용성을 위해)
+      const sessionCookies = uniqueCookies.filter(cookie => {
+        const name = cookie.name.toLowerCase();
+        
+        // 더 포괄적인 세션 쿠키 패턴
+        const sessionPatterns = [
+          'session', 'auth', 'token', 'login', 'user', 'sid', 'sso',
+          'csrf', 'xsrf', 'jwt', 'bearer', 'oauth', 'identity',
+          'remember', 'persistent', 'connect', 'secure', 'refresh',
+          '_ga', '_gid', '_gat', '_fbp', '_fbc',
+          'PHPSESSID', 'JSESSIONID', 'ASP.NET_SessionId',
+          '__cf_bm', '__cflb', 'AWSALB', 'AWSALBCORS'
+        ];
+        
+        return sessionPatterns.some(pattern => name.includes(pattern)) ||
+               cookie.httpOnly || 
+               cookie.secure ||
+               !cookie.expirationDate; // 세션 쿠키
+      });
+      
+      console.log(`Syncing ${sessionCookies.length} session cookies out of ${uniqueCookies.length} total`);
+      
+      const result = await chrome.runtime.sendMessage({
+        action: 'advancedSessionSync',
+        domain: domain.replace('www.', ''),
+        targetUrl: targetUrl,
+        sessionCookies: sessionCookies,
+        allCookies: uniqueCookies
+      });
+      
+      console.log('Advanced session sync result:', result);
+      return result;
+      
+    } catch (e) {
+      console.log('Advanced session sync failed:', e);
+      return { success: false };
+    }
+  }
+
+  async getAllDomainCookies(domain) {
+    // 이 함수는 이제 getRelatedDomains를 사용하도록 간소화
+    return this.getRelatedDomains(domain);
+  }
+
+  async validateSession(iframe, originalUrl) {
+    // 이 함수는 더 이상 사용하지 않고 quickSessionCheck로 대체
+    return this.quickSessionCheck(iframe, originalUrl);
   }
 
   hideLoadingIndicator() {
@@ -607,9 +1158,11 @@ class SplitScreenManager {
         if (loadingIndicator.parentNode) {
           loadingIndicator.remove();
         }
-        this.rightFrame.style.opacity = '1';
+        if (this.rightFrame) {
+          this.rightFrame.style.opacity = '1';
+        }
       }, 200);
-    } else {
+    } else if (this.rightFrame) {
       this.rightFrame.style.opacity = '1';
     }
   }
@@ -630,6 +1183,11 @@ class SplitScreenManager {
       this.rightFrame.style.display = 'none';
     }
     
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    if (loadingIndicator) {
+      loadingIndicator.remove();
+    }
+    
     const errorMessage = document.createElement('div');
     errorMessage.className = 'iframe-error';
     errorMessage.innerHTML = `
@@ -645,7 +1203,12 @@ class SplitScreenManager {
       </div>
     `;
     
-    this.rightPanel.appendChild(errorMessage);
+    const container = document.getElementById('iframeContainer');
+    if (container) {
+      container.appendChild(errorMessage);
+    } else {
+      this.rightPanel.appendChild(errorMessage);
+    }
     
     document.getElementById('openNewTab').addEventListener('click', () => {
       window.open(url, '_blank');
@@ -656,6 +1219,8 @@ class SplitScreenManager {
       if (this.rightFrame) {
         this.rightFrame.style.display = 'block';
         this.rightFrame.src = url;
+      } else {
+        this.loadUrl(url);
       }
     });
   }
@@ -666,7 +1231,8 @@ class SplitScreenManager {
       loadingIndicator.remove();
     }
     
-    this.handleGmailSpecial(url, this.rightPanel.querySelector('.iframe-container') || this.rightPanel);
+    const container = document.getElementById('iframeContainer') || this.rightPanel;
+    this.handleGmailSpecial(url, container);
   }
 
   showLoading() {
@@ -710,10 +1276,56 @@ class SplitScreenManager {
         }
       };
       
-      goBtn2.addEventListener('click', navigate);
-      addressInput.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') navigate();
+      addressInput.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          navigate();
+        }
       });
+      
+      addressInput.addEventListener('keyup', (e) => {
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      });
+      
+      addressInput.addEventListener('keypress', (e) => {
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          navigate();
+        }
+      });
+      
+      addressInput.addEventListener('copy', (e) => {
+        e.stopPropagation();
+      });
+      
+      addressInput.addEventListener('paste', (e) => {
+        e.stopPropagation();
+      });
+      
+      addressInput.addEventListener('cut', (e) => {
+        e.stopPropagation();
+      });
+      
+      addressInput.addEventListener('mousedown', (e) => {
+        e.stopPropagation();
+      });
+      
+      addressInput.addEventListener('mouseup', (e) => {
+        e.stopPropagation();
+      });
+      
+      addressInput.addEventListener('focus', (e) => {
+        e.stopPropagation();
+      });
+      
+      goBtn2.addEventListener('click', navigate);
     }
     
     if (newTabBtn) {
@@ -729,10 +1341,16 @@ class SplitScreenManager {
     }
 
     tabIcons.forEach(icon => {
-      // 기본 클릭
-      icon.addEventListener('click', () => {
+      icon.addEventListener('click', async () => {
         const url = icon.dataset.url;
         if (url && addressInput) {
+          const domain = new URL(url).hostname;
+          
+          if (this.checkIfNeedsSessionSync(domain)) {
+            console.log(`Tab click: pre-syncing for ${domain}`);
+            await this.preSessionSync(domain, url);
+          }
+          
           addressInput.value = url;
           if (this.rightFrame) {
             this.rightFrame.src = url;
@@ -740,7 +1358,6 @@ class SplitScreenManager {
         }
       });
       
-      // 우클릭으로 세션 복제
       icon.addEventListener('contextmenu', async (e) => {
         e.preventDefault();
         const url = icon.dataset.url;
@@ -780,7 +1397,6 @@ class SplitScreenManager {
     let startLeftWidth = 0;
     let startTopHeight = 0;
 
-    // 리사이징 완전히 중단하는 함수
     const stopResizing = () => {
       if (!isResizing) return;
       
@@ -788,7 +1404,6 @@ class SplitScreenManager {
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
       
-      // 모든 이벤트 리스너 제거
       document.removeEventListener('mousemove', handleMouseMove, true);
       document.removeEventListener('mouseup', handleMouseUp, true);
       document.removeEventListener('mouseleave', handleMouseLeave, true);
@@ -798,7 +1413,6 @@ class SplitScreenManager {
     const handleMouseMove = (e) => {
       if (!isResizing) return;
       
-      // 마우스 버튼이 눌려있지 않으면 중단
       if (e.buttons !== 1) {
         stopResizing();
         return;
@@ -845,19 +1459,15 @@ class SplitScreenManager {
     };
 
     const handleMouseLeave = (e) => {
-      // 창에서 마우스가 벗어나면 리사이징 중단
       if (isResizing && (e.clientX < 0 || e.clientY < 0 || 
           e.clientX > window.innerWidth || e.clientY > window.innerHeight)) {
         stopResizing();
       }
     };
 
-    // 마우스다운 이벤트
     this.resizer.addEventListener('mousedown', (e) => {
-      // 왼쪽 마우스 버튼만 허용
       if (e.button !== 0) return;
       
-      // 이미 리사이징 중이면 무시
       if (isResizing) {
         stopResizing();
         return;
@@ -873,13 +1483,11 @@ class SplitScreenManager {
         startTopHeight = this.leftPanel.offsetHeight;
       }
       
-      // 이벤트 리스너 등록
       document.addEventListener('mousemove', handleMouseMove, true);
       document.addEventListener('mouseup', handleMouseUp, true);
       document.addEventListener('mouseleave', handleMouseLeave, true);
-      window.addEventListener('blur', stopResizing, true); // 창이 포커스를 잃으면 중단
+      window.addEventListener('blur', stopResizing, true);
       
-      // 스타일 설정
       document.body.style.cursor = this.direction === 'vertical' ? 'col-resize' : 'row-resize';
       document.body.style.userSelect = 'none';
       
@@ -887,7 +1495,6 @@ class SplitScreenManager {
       e.stopPropagation();
     });
 
-    // 우클릭이나 다른 버튼 클릭 시 리사이징 중단
     this.resizer.addEventListener('contextmenu', (e) => {
       if (isResizing) {
         stopResizing();
@@ -895,7 +1502,6 @@ class SplitScreenManager {
       }
     });
 
-    // 키보드 ESC로 리사이징 중단
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && isResizing) {
         stopResizing();
@@ -904,24 +1510,39 @@ class SplitScreenManager {
   }
 
   handleKeydown(e) {
+    const activeElement = document.activeElement;
+    if (activeElement && activeElement.id === 'addressInput') {
+      if (e.key === 'Escape') {
+        activeElement.blur();
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      return;
+    }
+    
     if (e.key === 'Escape') {
       this.closeSplitScreen();
+      e.preventDefault();
+      e.stopPropagation();
     }
   }
 
   closeSplitScreen() {
     if (!this.isActive) return;
 
+    this.updateTabIcon(false);
+
     if (this.splitContainer) {
       this.splitContainer.remove();
     }
 
     const hiddenElements = Array.from(document.body.children).filter(el => 
-      el.style.display === 'none' && el.id !== 'split-screen-container'
+      el.style.visibility === 'hidden' && el.id !== 'split-screen-container'
     );
     
     hiddenElements.forEach(el => {
-      el.style.display = '';
+      el.style.visibility = '';
+      el.style.position = '';
     });
 
     document.body.style.margin = '';
@@ -935,6 +1556,106 @@ class SplitScreenManager {
     this.leftPanel = null;
     this.rightPanel = null;
     this.rightFrame = null;
+    this.sessionSyncInProgress = false;
+
+    if (window.gc) {
+      setTimeout(() => window.gc(), 100);
+    }
+  }
+
+  updateTabIcon(isSplitActive) {
+    try {
+      if (isSplitActive) {
+        this.originalFavicon = this.getCurrentFavicon();
+        this.setTemporaryFavicon();
+        
+        this.originalTitle = document.title;
+        document.title = `[Split View] ${this.originalTitle}`;
+      } else {
+        this.restoreOriginalFavicon();
+        
+        if (this.originalTitle) {
+          document.title = this.originalTitle;
+        }
+      }
+      
+    } catch (e) {
+      console.log('Failed to update tab icon:', e);
+    }
+  }
+
+  getCurrentFavicon() {
+    const existingLinks = document.querySelectorAll('link[rel*="icon"]');
+    const faviconInfo = [];
+    
+    existingLinks.forEach(link => {
+      if (link.href && !link.href.startsWith('data:')) {
+        faviconInfo.push({
+          rel: link.rel,
+          type: link.type,
+          href: link.href,
+          sizes: link.sizes ? link.sizes.toString() : null
+        });
+      }
+    });
+    
+    if (faviconInfo.length === 0) {
+      faviconInfo.push({
+        rel: 'shortcut icon',
+        type: 'image/x-icon',
+        href: `${window.location.origin}/favicon.ico`,
+        sizes: null
+      });
+    }
+    
+    return faviconInfo;
+  }
+
+  setTemporaryFavicon() {
+    const existingLinks = document.querySelectorAll('link[rel*="icon"]');
+    existingLinks.forEach(link => {
+      link.style.display = 'none';
+      link.dataset.originalDisplay = 'block';
+    });
+    
+    this.tempFaviconLink = document.createElement('link');
+    this.tempFaviconLink.rel = 'shortcut icon';
+    this.tempFaviconLink.type = 'image/x-icon';
+    this.tempFaviconLink.href = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="2" y="4" width="8" height="16" rx="1" fill="%23007acc"/><rect x="14" y="4" width="8" height="16" rx="1" fill="%2300a2ff"/><rect x="10" y="10" width="4" height="4" rx="1" fill="%23007acc"/></svg>';
+    this.tempFaviconLink.dataset.splitViewIcon = 'true';
+    
+    document.head.appendChild(this.tempFaviconLink);
+  }
+
+  restoreOriginalFavicon() {
+    if (this.tempFaviconLink) {
+      this.tempFaviconLink.remove();
+      this.tempFaviconLink = null;
+    }
+    
+    const splitIcons = document.querySelectorAll('link[data-split-view-icon="true"]');
+    splitIcons.forEach(icon => icon.remove());
+    
+    const hiddenLinks = document.querySelectorAll('link[rel*="icon"][style*="display: none"]');
+    hiddenLinks.forEach(link => {
+      link.style.display = link.dataset.originalDisplay || '';
+      delete link.dataset.originalDisplay;
+    });
+    
+    if (this.originalFavicon && this.originalFavicon.length > 0) {
+      if (hiddenLinks.length === 0) {
+        this.originalFavicon.forEach(info => {
+          const link = document.createElement('link');
+          link.rel = info.rel;
+          link.type = info.type;
+          link.href = info.href;
+          if (info.sizes) {
+            link.sizes = info.sizes;
+          }
+          document.head.appendChild(link);
+        });
+      }
+    }
   }
 
   addToHistory(url) {
@@ -970,10 +1691,8 @@ class SplitScreenManager {
   }
 }
 
-// 전역 인스턴스
 const splitScreenManager = new SplitScreenManager();
 
-// 메시지 리스너
 chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
   await splitScreenManager.init();
   
